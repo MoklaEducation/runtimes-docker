@@ -1,0 +1,63 @@
+name: Queue DMOJ PR candidate
+
+"on":
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft }}
+    runs-on: dmoj-docker
+    timeout-minutes: 5
+    env:
+      PR_REPOSITORY: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_BASE: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      LAB_DISPATCH_TOKEN: ${{ secrets.LAB_DMOJ_PR_DISPATCH_TOKEN }}
+      LAB_RECIPE_REF: ${{ vars.LAB_DMOJ_PR_RECIPE_REF || 'main' }}
+    steps:
+      - name: Queue a candidate in lab
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.error, urllib.request
+
+          number, base, head = (os.environ[key] for key in ("PR_NUMBER", "PR_BASE", "PR_HEAD"))
+          repository = os.environ["PR_REPOSITORY"]
+          if repository not in {"MoklaEducation/moj-online-judge", "MoklaEducation/moj-site-assets",
+                                 "MoklaEducation/moj-ansi2html", "MoklaEducation/moj-django-fernet-fields",
+                                 "MoklaEducation/moj-jsonfield", "MoklaEducation/moj-wpadmin",
+                                 "MoklaEducation/moj-pdfoid", "MoklaEducation/moj-texoid",
+                                 "MoklaEducation/moj-judge-server", "MoklaEducation/moj-runtimes-docker"}:
+              raise SystemExit("Unsupported candidate repository")
+          if not re.fullmatch(r"[1-9][0-9]{0,9}", number) or any(
+              not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)
+          ):
+              raise SystemExit("Invalid PR identity")
+          token = os.environ["LAB_DISPATCH_TOKEN"]
+          if not token:
+              raise SystemExit("Missing lab dispatch credential")
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          request = urllib.request.Request(
+              "https://git.home.arpa/api/v1/repos/MoklaEducation/lab/actions/workflows/dmoj-pr-candidate.yml/dispatches",
+              data=json.dumps({"ref": os.environ["LAB_RECIPE_REF"],
+                               "inputs": {"repository": repository, "number": number,
+                                          "base": base, "head": head}}).encode(),
+              headers={"Authorization": "token " + token, "Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
+                  if response.status != 204:
+                      raise SystemExit(f"Unexpected dispatch response: HTTP {response.status}")
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f"Lab dispatch failed: HTTP {error.code}") from None
+          print(f"Queued PR #{number} at {head}. Check MoklaEducation/lab Actions for the build result.")
+          PY
