@@ -1,54 +1,46 @@
-name: Moj PR candidate check
+name: Moj merge preview (no image build)
 
 "on":
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: moj-pr-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  candidate:
+  merge-preview:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft }}
     runs-on: dmoj-docker
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - name: Check out PR head
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out approved central CI
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: MoklaEducation/lab
-          ref: main
-          path: .lab-ci
-          persist-credentials: false
-
-      - name: Run central PR and merge-preview check
+      - name: Verify the exact merge tree
+        shell: bash
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 .lab-ci/infra/workload/code/scripts/pr_check.py check \
-            --source-repository "$SOURCE_REPOSITORY" \
-            --pr-head "$PR_HEAD_SHA" \
-            --base-sha "$PR_BASE_SHA" \
-            --source-dir "$GITHUB_WORKSPACE" \
-            --output-dir "$GITHUB_WORKSPACE/.lab-ci/.state/pr-check"
-
-      - name: Retain sanitized PR evidence
-        if: always()
-        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
-        with:
-          name: moj-pr-check
-          path: .lab-ci/.state/pr-check/result.json
-          if-no-files-found: warn
-          retention-days: 14
+          for sha in "$PR_BASE_SHA" "$PR_HEAD_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid PR commit identity"; exit 1; }
+            git cat-file -e "$sha^{commit}"
+          done
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA" || { echo "Unexpected PR checkout"; exit 1; }
+          if ! tree=$(git merge-tree --write-tree "$PR_BASE_SHA" "$PR_HEAD_SHA"); then
+            printf '%s\n' "$tree"
+            echo "Could not produce a clean merge preview"
+            exit 1
+          fi
+          git diff --check "$PR_BASE_SHA" "$tree"
+          printf 'Verified merge tree %s (base %s, head %s). No image built.\n' "$tree" "$PR_BASE_SHA" "$PR_HEAD_SHA"
