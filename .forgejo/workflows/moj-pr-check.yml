@@ -1,0 +1,54 @@
+name: Moj PR candidate check
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: moj-pr-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    runs-on: dmoj-docker
+    timeout-minutes: 30
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Check out approved central CI
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: MoklaEducation/lab
+          ref: main
+          path: .lab-ci
+          persist-credentials: false
+
+      - name: Run central PR and merge-preview check
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 .lab-ci/infra/workload/code/scripts/pr_check.py check \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --pr-head "$PR_HEAD_SHA" \
+            --base-sha "$PR_BASE_SHA" \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/.lab-ci/.state/pr-check"
+
+      - name: Retain sanitized PR evidence
+        if: always()
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
+        with:
+          name: moj-pr-check
+          path: .lab-ci/.state/pr-check/result.json
+          if-no-files-found: warn
+          retention-days: 14
